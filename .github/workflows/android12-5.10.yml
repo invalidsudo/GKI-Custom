@@ -1,0 +1,134 @@
+name: Android12-5.10
+
+on:
+  workflow_dispatch:
+    inputs:
+      os_patch_level:
+        required: true
+        type: string
+        description: >
+          Tag suffix (Check https://android.googlesource.com/kernel/common/+refs),
+          Must include revision! Example: 2024-08_r9
+      os_version:
+        required: true
+        type: string
+        description: >
+          OS Version of boot image,
+          Example: 12.0.0
+      version_name:
+        required: true
+        type: string
+        description: >
+          Custom name for filename,
+          Example: android12-5.10.209
+      custom:
+        required: true
+        type: boolean
+        description: >
+          Enable LXC, Docker config
+      kernelsu:
+        required: true
+        type: boolean
+        description: >
+          Enable KernelSU
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y repo wget bc bison flex build-essential python3-pip git zip unzip
+        # 设置 git 凭证存储，防止部分仓库拉取时报错
+        git config --global credential.helper store
+
+    - name: Sync the kernel source code
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/android-kernel
+        cd $GITHUB_WORKSPACE/android-kernel
+        # 修正1: 去掉了 'common-' 前缀，直接拼接输入的 Tag (例如: android12-5.10-2024-08_r9)
+        repo init --depth 1 -u https://android.googlesource.com/kernel/manifest -b android12-5.10-${{ inputs.os_patch_level }}
+        # 修正2: 增加 -j 提高速度，--fail-fast 遇到错误立即停止
+        repo sync -j$(nproc) --fail-fast
+
+    - name: Apply patches and configuration files
+      if: ${{ inputs.custom == true }}
+      run: |
+        cd $GITHUB_WORKSPACE
+        git clone https://github.com/TapetalArray/GKI-Custom.git gki-patch
+        # 注意：这里假设 gki-patch 仓库里的路径是正确的，如果报错找不到文件请检查仓库结构
+        cp ./gki-patch/config/gki_defconfig-android12-5.10 ./android-kernel/common/arch/arm64/configs/gki_defconfig
+        
+        # 尝试应用补丁，如果补丁目录为空则不报错
+        if [ -d "$GITHUB_WORKSPACE/gki-patch/patchs" ] && [ "$(ls -A $GITHUB_WORKSPACE/gki-patch/patchs/*.patch 2>/dev/null)" ]; then
+            cd ./android-kernel/common
+            git apply $GITHUB_WORKSPACE/gki-patch/patchs/*.patch
+        else
+            echo "No patches found or patch directory missing."
+        fi
+
+    - name: KernelSU
+      if: ${{ inputs.kernelsu == true }}
+      run: |
+        cd $GITHUB_WORKSPACE/android-kernel/common
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+
+    - name: Build Kernel
+      run: |
+        cd $GITHUB_WORKSPACE/android-kernel
+        # 使用 Google 推荐的构建方式
+        BUILD_CONFIG=common/build.config.gki.aarch64 build/config.sh savedefconfig
+        LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
+
+    - name: Prepare artifacts
+      id: prepareArtifacts
+      run: |
+        cd $GITHUB_WORKSPACE
+        OUTDIR=android-kernel/out/android12-5.10/dist
+        mkdir output
+        
+        # 复制内核镜像
+        if [ -f "$OUTDIR/Image" ]; then cp $OUTDIR/Image ./output/; fi
+        if [ -f "$OUTDIR/Image.lz4" ]; then cp $OUTDIR/Image.lz4 ./output/; fi
+        cp $OUTDIR/Image ./
+        gzip -n -k -f -9 Image > Image.gz
+        
+        # AnyKernel3 打包
+        git clone https://github.com/Kernel-SU/AnyKernel3
+        rm -rf ./AnyKernel3/.git
+        cp $OUTDIR/Image ./AnyKernel3/
+        # 将 AnyKernel3 打包成 zip，方便直接刷入
+        cd AnyKernel3
+        zip -r9 ../output/AnyKernel3-${{ inputs.version_name }}.zip * -x .git README.md *placeholder
+        cd ..
+
+        # 下载官方 Boot 镜像用于重新打包
+        # 修正3: 去掉硬编码的 _r1，使用 inputs.os_patch_level (例如 2024-08_r9)
+        wget https://dl.google.com/android/gki/gki-certified-boot-android12-5.10-${{ inputs.os_patch_level }}.zip -O ./gki-kernel.zip
+        unzip -q ./gki-kernel.zip -d ./boot-img-source
+        rm ./gki-kernel.zip
+        
+        # 使用 python3 运行脚本
+        cd $GITHUB_WORKSPACE/android-kernel
+        echo "Unpack boot"
+        # 注意: 这里的路径根据上面 unzip 的位置进行了调整
+        ./tools/mkbootimg/unpack_bootimg.py --boot_img $GITHUB_WORKSPACE/boot-img-source/boot-*.img
+        
+        echo "Build boot.img"
+        ./tools/mkbootimg/mkbootimg.py --header_version 4 --kernel out/android12-5.10/dist/Image --ramdisk out/ramdisk --os_version ${{ inputs.os_version }} --os_patch_level 2024-08 -o $GITHUB_WORKSPACE/output/${{ inputs.version_name }}_${{ inputs.os_patch_level }}-boot.img
+        
+        echo "Build boot-lz4.img"
+        ./tools/mkbootimg/mkbootimg.py --header_version 4 --kernel out/android12-5.10/dist/Image.lz4 --ramdisk out/ramdisk --os_version ${{ inputs.os_version }} --os_patch_level 2024-08 -o $GITHUB_WORKSPACE/output/${{ inputs.version_name }}_${{ inputs.os_patch_level }}-boot-lz4.img
+        
+        echo "Build boot-gz.img"
+        ./tools/mkbootimg/mkbootimg.py --header_version 4 --kernel $GITHUB_WORKSPACE/Image.gz --ramdisk out/ramdisk --os_version ${{ inputs.os_version }} --os_patch_level 2024-08 -o $GITHUB_WORKSPACE/output/${{ inputs.version_name }}_${{ inputs.os_patch_level }}-boot-gz.img
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kernel-Result-${{ inputs.version_name }}-${{ inputs.os_patch_level }}
+        path: ./output/*
