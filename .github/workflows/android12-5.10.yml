@@ -67,13 +67,17 @@ jobs:
     - name: Apply patches and configuration files
       if: ${{ inputs.custom == true }}
       run: |
-        cd $GITHUB_WORKSPACE
-        git clone https://github.com/TapetalArray/GKI-Custom.git gki-patch
-        cp ./gki-patch/config/gki_defconfig-android12-5.10 ./android-kernel/common/arch/arm64/configs/gki_defconfig
+        # 不需要 git clone，因为代码已经在 $GITHUB_WORKSPACE 里了
         
-        if [ -d "$GITHUB_WORKSPACE/gki-patch/patchs" ] && [ "$(ls -A $GITHUB_WORKSPACE/gki-patch/patchs/*.patch 2>/dev/null)" ]; then
-            cd ./android-kernel/common
-            git apply $GITHUB_WORKSPACE/gki-patch/patchs/*.patch
+        # 1. 复制配置文件 (注意路径去掉了 gki-patch/)
+        # 假设你的仓库根目录下有 config 文件夹
+        cp $GITHUB_WORKSPACE/config/gki_defconfig-android12-5.10 $GITHUB_WORKSPACE/android-kernel/common/arch/arm64/configs/gki_defconfig
+        
+        # 2. 应用补丁 (注意路径去掉了 gki-patch/)
+        # 假设你的仓库根目录下有 patchs 文件夹
+        if [ -d "$GITHUB_WORKSPACE/patchs" ] && [ "$(ls -A $GITHUB_WORKSPACE/patchs/*.patch 2>/dev/null)" ]; then
+            cd $GITHUB_WORKSPACE/android-kernel/common
+            git apply $GITHUB_WORKSPACE/patchs/*.patch
         else
             echo "No patches found or patch directory missing."
         fi
