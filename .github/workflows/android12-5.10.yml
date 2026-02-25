@@ -82,6 +82,21 @@ jobs:
             echo "No patches found or patch directory missing."
         fi
 
+    - name: In-place patch kernel/module.c
+      run: |
+        cd $GITHUB_WORKSPACE/android-kernel/common
+        
+        # 1. Modify the warning message
+        sed -i 's/disagrees about version of symbol %s\\n/disagrees about version of symbol %s, but ignore...\\n/g' kernel/module.c
+        
+        # 2. Modify the return value specifically in the bad_version block
+        # This looks for the line 'bad_version:' and changes the 'return 0;' that follows it.
+        sed -i '/bad_version:/,/}/ s/return 0;/return 1;/' kernel/module.c
+        
+        # 3. Verify the changes (this will print the changes to the Action logs so you can check)
+        echo "Verification: Checking modified code block..."
+        grep -A 5 "bad_version:" kernel/module.c
+
     - name: KernelSU
       if: ${{ inputs.kernelsu == true }}
       run: |
